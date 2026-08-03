@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "dashboard:dev": "cd dashboard && npm install && npm run dev",
-    "dashboard:build": "cd dashboard && npm run build",
-    "dashboard:start": "cd dashboard && npm run start"
+    "dashboard:build": "cd dashboard && npm install && npm run build",
+    "dashboard:start": "cd dashboard && npm run start",
+    "build": "npm run dashboard:build",
+    "start": "npm run dashboard:start"
   }
 }
