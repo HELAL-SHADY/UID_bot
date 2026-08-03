@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+import time
+from collections import defaultdict
+from typing import Optional
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
+
+from bot.database import (
+    add_submission,
+    add_transaction,
+    create_withdraw_request,
+    ensure_user,
+    get_leaderboard,
+    get_stats_summary,
+    get_user_by_telegram_id,
+    get_user_stats,
+    refresh_ranks,
+    set_balance,
+)
+from bot.config import ADMIN_ID, RATE_LIMIT_PER_MINUTE
+from bot.handlers.admin import notify_admin_of_submission, notify_admin_of_withdrawal
+from bot.utils.logging import setup_logging
+
+logger = setup_logging()
+USER_ACTION_TIMES: dict[int, list[float]] = defaultdict(list)
+
+WELCOME_TEXT = {
+    "en": (
+        "Welcome to the Bybit UID Review Bot!\n\n"
+        "Here’s how the reward system works:\n"
+        "• Submit your Bybit UID for review\n"
+        "• If approved, you receive a $1.00 reward balance\n"
+        "• You can track your balance, statistics, and leaderboard here\n\n"
+        "To get started, use the buttons below."
+    ),
+    "ar": (
+        "مرحبًا بك في بوت مراجعة Bybit UID!\n\n"
+        "إليك كيف تعمل نظام المكافآت:\n"
+        "• أرسل Bybit UID الخاص بك للمراجعة\n"
+        "• إذا تمت الموافقة عليه، ستحصل على رصيد مكافأة بقيمة 1.00 دولار\n"
+        "• يمكنك متابعة رصيدك وإحصائياتك ولوحة المتصدرين هنا\n\n"
+        "للبداية، استخدم الأزرار أدناه."
+    ),
+}
+
+def get_user_language(user) -> str:
+    if not user:
+        return "en"
+    return user.get("language", "en") if isinstance(user, dict) else "en"
+
+
+def check_rate_limit(user_id: int) -> bool:
+    now = time.time()
+    timestamps = [ts for ts in USER_ACTION_TIMES[user_id] if now - ts < 60]
+    timestamps.append(now)
+    USER_ACTION_TIMES[user_id] = timestamps
+    return len(timestamps) <= RATE_LIMIT_PER_MINUTE
+
+
+def build_main_menu(language: str = "en") -> InlineKeyboardMarkup:
+    labels = {
+        "en": {
+            "submit": "Submit UID",
+            "balance": "My Balance",
+            "withdraw": "Withdraw Balance",
+            "stats": "My Statistics",
+        },
+        "ar": {
+            "submit": "إرسال UID",
+            "balance": "رصيدي",
+            "withdraw": "سحب الرصيد",
+            "stats": "إحصائياتي",
+        },
+    }
+    current = labels[language]
+    keyboard = [
+        [InlineKeyboardButton(current["submit"], callback_data="submit_uid")],
+        [InlineKeyboardButton(current["balance"], callback_data="my_balance")],
+        [InlineKeyboardButton(current["withdraw"], callback_data="withdraw_balance")],
+        [InlineKeyboardButton(current["stats"], callback_data="my_stats")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat:
+        return
+
+    user = update.effective_user
+    if user:
+        ensure_user(
+            telegram_id=user.id,
+            username=user.username,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+            full_name=(user.first_name or "") + (" " + user.last_name if user.last_name else ""),
+        )
+
+    user_record = get_user_by_telegram_id(user.id) if user else None
+    language = get_user_language(user_record)
+    await update.message.reply_text(WELCOME_TEXT[language], reply_markup=build_main_menu(language))
+
+
+async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    if not check_rate_limit(query.from_user.id):
+        await query.answer("Too many requests. Please slow down.", show_alert=True)
+        return
+    await query.answer()
+
+    user = get_user_by_telegram_id(query.from_user.id)
+    language = get_user_language(user)
+
+    data = query.data or ""
+    if data == "submit_uid":
+        prompt = {
+            "en": "Please send your Bybit UID. It must be numeric and unique.",
+            "ar": "يرجى إرسال Bybit UID الخاص بك. يجب أن يكون رقميًا وفريدًا.",
+        }[language]
+        await query.edit_message_text(prompt)
+        context.chat_data["state"] = "awaiting_uid"
+        return
+
+    if data == "my_balance":
+        user = get_user_by_telegram_id(query.from_user.id)
+        if not user:
+            await query.edit_message_text("You are not registered yet. Start the bot again with /start.")
+            return
+        stats = get_user_stats(int(user["id"]))
+        refresh_ranks()
+        text = {
+            "en": f"Your current balance is ${stats['balance']:.2f}\nApproved UIDs: {stats['approved_count']}\nTotal earnings: ${stats['total_earnings']:.2f}",
+            "ar": f"رصيدك الحالي هو ${stats['balance']:.2f}\nUIDs المعتمدة: {stats['approved_count']}\nالإجمالي المكتسب: ${stats['total_earnings']:.2f}",
+        }[language]
+        await query.edit_message_text(text)
+        return
+
+    if data == "withdraw_balance":
+        user = get_user_by_telegram_id(query.from_user.id)
+        if not user:
+            await query.edit_message_text("You are not registered yet. Start the bot again with /start.")
+            return
+        stats = get_user_stats(int(user["id"]))
+        text = {
+            "en": f"Your current balance is ${stats['balance']:.2f}.\nPlease send your Binance UID and any withdrawal notes.\nExample: 12345678 | BTC network",
+            "ar": f"رصيدك الحالي هو ${stats['balance']:.2f}.\nيرجى إرسال Binance UID الخاص بك وأي ملاحظات للسحب.\nمثال: 12345678 | BTC network",
+        }[language]
+        await query.edit_message_text(text)
+        context.chat_data["state"] = "awaiting_withdrawal"
+        return
+
+    if data == "my_stats":
+        user = get_user_by_telegram_id(query.from_user.id)
+        if not user:
+            await query.edit_message_text("You are not registered yet. Start the bot again with /start.")
+            return
+        stats = get_user_stats(int(user["id"]))
+        refresh_ranks()
+        leaderboard = get_leaderboard()
+        top_entries = []
+        for index, row in enumerate(leaderboard[:5], start=1):
+            name = row["full_name"] or row["username"] or f"User {row['telegram_id']}"
+            top_entries.append(
+                f"{index}. {name} — Approved: {row['approved_count']}, Earnings: ${float(row['total_earnings']):.2f}"
+            )
+        rank_text = "\n".join(top_entries) if top_entries else ("No leaderboard entries yet." if language == "en" else "لا توجد إدخالات في لوحة المتصدرين بعد.")
+        text = {
+            "en": f"Your rank: #{int(user['rank']) if user['rank'] else 'N/A'}\nApproved UIDs: {stats['approved_count']}\nTotal earnings: ${stats['total_earnings']:.2f}\n\nTop users:\n{rank_text}",
+            "ar": f"رتبتك: #{int(user['rank']) if user['rank'] else 'N/A'}\nUIDs المعتمدة: {stats['approved_count']}\nالإجمالي المكتسب: ${stats['total_earnings']:.2f}\n\nأعلى المستخدمين:\n{rank_text}",
+        }[language]
+        await query.edit_message_text(text)
+        return
+
+
+async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+    if not check_rate_limit(update.effective_user.id):
+        await update.message.reply_text("Too many requests. Please wait a moment and try again.")
+        return
+
+    state = context.chat_data.get("state")
+    if state == "awaiting_uid":
+        await process_uid_submission(update, context)
+        return
+
+    if state == "awaiting_withdrawal":
+        await process_withdrawal_request(update, context)
+        return
+
+
+def is_valid_uid(value: str) -> bool:
+    return value.isdigit() and 4 <= len(value) <= 20
+
+
+async def process_uid_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = (update.message.text or "").strip()
+    if not is_valid_uid(uid):
+        await update.message.reply_text("Please enter a valid numeric Bybit UID.")
+        return
+
+    user = ensure_user(
+        telegram_id=update.effective_user.id,
+        username=update.effective_user.username,
+        first_name=update.effective_user.first_name or "",
+        last_name=update.effective_user.last_name or "",
+        full_name=(update.effective_user.first_name or "") + (" " + update.effective_user.last_name if update.effective_user.last_name else ""),
+    )
+
+    existing_user = get_user_by_telegram_id(update.effective_user.id)
+    if not existing_user:
+        await update.message.reply_text("Your account could not be registered. Please try again.")
+        return
+
+    # Prevent duplicate UID submissions using a simple lookup.
+    from bot.database import get_connection
+
+    conn = get_connection()
+    duplicate = conn.execute("SELECT id FROM uid_submissions WHERE uid = ?", (uid,)).fetchone()
+    conn.close()
+    if duplicate:
+        await update.message.reply_text("This UID has already been submitted before.")
+        context.chat_data.pop("state", None)
+        return
+
+    submission_id = add_submission(int(existing_user["id"]), uid)
+    await update.message.reply_text("Your UID has been submitted successfully and is pending review.")
+    await notify_admin_of_submission(update, context, submission_id, uid)
+    context.chat_data.pop("state", None)
+
+
+async def process_withdrawal_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    payload = (update.message.text or "").strip()
+    if not payload:
+        await update.message.reply_text("Please provide a valid Binance UID and optional notes.")
+        return
+
+    parts = [part.strip() for part in payload.split("|", 1)]
+    binance_uid = parts[0]
+    notes = parts[1] if len(parts) > 1 else "No additional notes"
+    if not binance_uid or len(binance_uid) < 2:
+        await update.message.reply_text("Please provide a valid Binance UID.")
+        return
+
+    user = get_user_by_telegram_id(update.effective_user.id)
+    if not user:
+        await update.message.reply_text("You are not registered yet.")
+        return
+
+    stats = get_user_stats(int(user["id"]))
+    if stats["balance"] <= 0:
+        await update.message.reply_text("Your balance is zero, so there is nothing to withdraw.")
+        context.chat_data.pop("state", None)
+        return
+
+    withdrawal_info = f"Binance UID: {binance_uid}"
+    if notes and notes != "No additional notes":
+        withdrawal_info += f" | Notes: {notes}"
+
+    request_id = create_withdraw_request(int(user["id"]), float(stats["balance"]), withdrawal_info)
+    await update.message.reply_text("Your withdrawal request has been submitted for review.")
+    await notify_admin_of_withdrawal(update, context, request_id, float(stats["balance"]), withdrawal_info)
+    context.chat_data.pop("state", None)

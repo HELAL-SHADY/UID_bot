@@ -1,0 +1,9 @@
+{
+  "name": "bybit-uid",
+  "private": true,
+  "scripts": {
+    "dashboard:dev": "cd dashboard && npm install && npm run dev",
+    "dashboard:build": "cd dashboard && npm run build",
+    "dashboard:start": "cd dashboard && npm run start"
+  }
+}
