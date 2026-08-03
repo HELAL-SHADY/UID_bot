@@ -1,0 +1,12 @@
+node_modules
+*.log
+.env
+bot/data
+.DS_Store
+.git
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.next
+**/dist
