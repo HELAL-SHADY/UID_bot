@@ -70,7 +70,7 @@ def init_db() -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS action_logs (
             id SERIAL PRIMARY KEY,
-            actor_id INTEGER,
+            actor_id BIGINT,
             action TEXT NOT NULL,
             details TEXT,
             created_at TEXT NOT NULL
@@ -86,6 +86,12 @@ def init_db() -> None:
                 WHERE table_name='users' AND column_name='language'
             ) THEN
                 ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'en';
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='action_logs' AND column_name='actor_id' AND data_type='integer'
+            ) THEN
+                ALTER TABLE action_logs ALTER COLUMN actor_id TYPE BIGINT;
             END IF;
         END
         $$;
@@ -320,15 +326,18 @@ def update_withdraw_request_status(request_id: int, status: str) -> None:
 
 
 def log_action(actor_id: Optional[int], action: str, details: str) -> None:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO action_logs (actor_id, action, details, created_at) VALUES (%s, %s, %s, NOW()::text)",
-        (actor_id, action, details),
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO action_logs (actor_id, action, details, created_at) VALUES (%s, %s, %s, NOW()::text)",
+            (actor_id, action, details),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as exc:
+        print(f"Failed to log action {action}: {exc}")
 
 
 def get_stats_summary() -> dict:
