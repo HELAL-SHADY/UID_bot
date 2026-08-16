@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import ADMIN_ID, REWARD_AMOUNT
+from bot.config import ADMIN_ID, ADMIN_IDS, REWARD_AMOUNT
 from bot.database import (
     add_transaction,
     get_all_users,
@@ -30,9 +31,10 @@ REJECTION_REASONS = [
 ]
 
 
-
 async def is_admin(update: Update) -> bool:
-    return bool(update.effective_user and update.effective_user.id == ADMIN_ID)
+    if not update.effective_user:
+        return False
+    return update.effective_user.id in ADMIN_IDS or update.effective_user.id == ADMIN_ID
 
 
 async def notify_admin_of_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, submission_id: int, uid: str) -> None:
@@ -60,7 +62,11 @@ async def notify_admin_of_submission(update: Update, context: ContextTypes.DEFAU
             [InlineKeyboardButton("❌ Reject", callback_data=f"reject_uid:{submission_id}")],
         ]
     )
-    await context.bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=keyboard)
+    for admin_id in (ADMIN_IDS or {ADMIN_ID}):
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
+        except Exception as exc:
+            logger.error("Failed to notify admin %s of submission %s: %s", admin_id, submission_id, exc)
 
 
 async def notify_admin_of_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, amount: float, info: str) -> None:
@@ -81,7 +87,11 @@ async def notify_admin_of_withdrawal(update: Update, context: ContextTypes.DEFAU
             [InlineKeyboardButton("❌ Reject Withdrawal", callback_data=f"reject_withdraw:{request_id}")],
         ]
     )
-    await context.bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=keyboard)
+    for admin_id in (ADMIN_IDS or {ADMIN_ID}):
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
+        except Exception as exc:
+            logger.error("Failed to notify admin %s of withdrawal %s: %s", admin_id, request_id, exc)
 
 
 async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -134,7 +144,7 @@ async def handle_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not submissions:
         await update.message.reply_text("No pending submissions.")
         return
-    lines = [f"{s['id']}: {s['uid']} | Status: {s['status']}" for s in submissions]
+    lines = [f"ID {s['id']}: UID {s['uid']} | User {s['user_id']}" for s in submissions]
     await update.message.reply_text("Pending UIDs:\n" + "\n".join(lines[:20]))
 
 
@@ -143,7 +153,7 @@ async def handle_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not withdrawals:
         await update.message.reply_text("No pending withdrawals.")
         return
-    lines = [f"{w['id']}: Amount ${float(w['amount']):.2f} | Info: {w['withdrawal_info']}" for w in withdrawals]
+    lines = [f"ID {w['id']}: Amount ${float(w['amount']):.2f} | Info: {w['withdrawal_info']}" for w in withdrawals]
     await update.message.reply_text("Pending withdrawals:\n" + "\n".join(lines[:20]))
 
 
@@ -152,7 +162,6 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not message_text:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
-    from bot.database import get_all_users
 
     users = get_all_users()
     sent = 0
@@ -166,8 +175,17 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.callback_query or not await is_admin(update):
+    if not update.callback_query:
         return
+    if not await is_admin(update):
+        logger.warning(
+            "Non-admin user %s attempted admin callback %s",
+            update.effective_user.id if update.effective_user else None,
+            update.callback_query.data,
+        )
+        await update.callback_query.answer("Access denied.", show_alert=True)
+        return
+
     await update.callback_query.answer()
     data = update.callback_query.data or ""
 
@@ -178,6 +196,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data.startswith("reject_uid:"):
         submission_id = int(data.split(":", 1)[1])
+        if context.chat_data is not None:
+            context.chat_data["pending_rejection"] = submission_id
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton(reason, callback_data=f"reject_reason:{submission_id}:{index}")] for index, reason in enumerate(REJECTION_REASONS)]
         )
@@ -193,6 +213,19 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await reject_uid_submission(update, context, submission_id, reason)
         return
 
+    if data.startswith("reason:"):
+        submission_id = context.chat_data.get("pending_rejection") if context.chat_data else None
+        reason_index = int(data.split(":", 1)[1])
+        if 0 <= reason_index < len(REJECTION_REASONS):
+            reason = REJECTION_REASONS[reason_index]
+            if submission_id:
+                await reject_uid_submission(update, context, int(submission_id), reason)
+            else:
+                await update.callback_query.edit_message_text(
+                    "⚠️ This rejection menu has expired. Please trigger rejection again from a new submission message."
+                )
+        return
+
     if data.startswith("approve_withdraw:"):
         request_id = int(data.split(":", 1)[1])
         await approve_withdrawal(update, context, request_id)
@@ -205,69 +238,134 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def approve_uid_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, submission_id: int) -> None:
-    submission = get_submission_by_id(submission_id)
-    if not submission:
-        return
-    user = get_user_by_id(int(submission["user_id"]))
-    if not user:
-        return
+    try:
+        submission = get_submission_by_id(submission_id)
+        if not submission:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ Submission {submission_id} not found.")
+            return
+        user = get_user_by_id(int(submission["user_id"]))
+        if not user:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ User for submission {submission_id} not found.")
+            return
 
-    update_submission_status(submission_id, "Approved")
-    current_balance = float(user["balance"])
-    new_balance = current_balance + REWARD_AMOUNT
-    set_balance(int(user["id"]), new_balance)
-    add_transaction(int(user["id"]), "reward", REWARD_AMOUNT, f"Approved UID reward for submission {submission_id}")
-    log_action(ADMIN_ID, "approve_uid", f"submission_id={submission_id}")
+        update_submission_status(submission_id, "Approved")
+        current_balance = float(user["balance"])
+        new_balance = current_balance + REWARD_AMOUNT
+        set_balance(int(user["id"]), new_balance)
+        add_transaction(int(user["id"]), "reward", REWARD_AMOUNT, f"Approved UID reward for submission {submission_id}")
+        log_action(ADMIN_ID, "approve_uid", f"submission_id={submission_id}")
 
-    await context.bot.send_message(
-        chat_id=int(user["telegram_id"]),
-        text=f"Your UID has been approved. ${REWARD_AMOUNT:.2f} has been added to your balance.",
-    )
-    await update.callback_query.edit_message_text(f"Submission {submission_id} approved.")
+        try:
+            await context.bot.send_message(
+                chat_id=int(user["telegram_id"]),
+                text=f"Your UID has been approved. ${REWARD_AMOUNT:.2f} has been added to your balance.",
+            )
+        except Exception as exc:
+            logger.error("Could not send approval message to user %s: %s", user['telegram_id'], exc)
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"✅ Submission {submission_id} approved.")
+    except Exception as exc:
+        logger.error("Error approving submission %s: %s", submission_id, exc, exc_info=True)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"⚠️ Error approving submission: {exc}")
 
 
 async def reject_uid_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, submission_id: int, reason: str) -> None:
-    submission = get_submission_by_id(submission_id)
-    if not submission:
-        return
-    user = get_user_by_id(int(submission["user_id"]))
-    if not user:
-        return
+    try:
+        submission = get_submission_by_id(submission_id)
+        if not submission:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ Submission {submission_id} not found.")
+            return
+        user = get_user_by_id(int(submission["user_id"]))
+        if not user:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ User for submission {submission_id} not found.")
+            return
 
-    update_submission_status(submission_id, "Rejected", reason)
-    log_action(ADMIN_ID, "reject_uid", f"submission_id={submission_id}; reason={reason}")
-    await context.bot.send_message(chat_id=int(user["telegram_id"]), text=f"Your UID submission was rejected. Reason: {reason}")
-    await update.callback_query.edit_message_text(f"Submission {submission_id} rejected.")
+        update_submission_status(submission_id, "Rejected", reason)
+        log_action(ADMIN_ID, "reject_uid", f"submission_id={submission_id}; reason={reason}")
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(user["telegram_id"]),
+                text=f"Your UID submission was rejected.\nReason: {reason}",
+            )
+        except Exception as exc:
+            logger.error("Could not send rejection message to user %s: %s", user['telegram_id'], exc)
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"❌ Submission {submission_id} rejected.\nReason: {reason}")
+    except Exception as exc:
+        logger.error("Error rejecting submission %s: %s", submission_id, exc, exc_info=True)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"⚠️ Error rejecting submission: {exc}")
 
 
 async def approve_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
-    request = get_withdraw_request_by_id(request_id)
-    if not request:
-        return
-    user = get_user_by_id(int(request["user_id"]))
-    if not user:
-        return
-    update_withdraw_request_status(request_id, "Approved")
-    deduction_amount = min(float(request["amount"]), float(user["balance"]))
-    new_balance = float(user["balance"]) - deduction_amount
-    set_balance(int(user["id"]), new_balance)
-    add_transaction(int(user["id"]), "withdrawal", -deduction_amount, f"Withdrawal approved for request {request_id}")
-    log_action(ADMIN_ID, "approve_withdrawal", f"request_id={request_id}")
-    await context.bot.send_message(
-        chat_id=int(user["telegram_id"]),
-        text=f"Your withdrawal request has been approved. ${deduction_amount:.2f} has been deducted from your balance.",
-    )
-    await update.callback_query.edit_message_text(f"Withdrawal {request_id} approved.")
+    try:
+        request = get_withdraw_request_by_id(request_id)
+        if not request:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ Withdrawal request {request_id} not found.")
+            return
+        user = get_user_by_id(int(request["user_id"]))
+        if not user:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ User for withdrawal {request_id} not found.")
+            return
+        update_withdraw_request_status(request_id, "Approved")
+        deduction_amount = min(float(request["amount"]), float(user["balance"]))
+        new_balance = float(user["balance"]) - deduction_amount
+        set_balance(int(user["id"]), new_balance)
+        add_transaction(int(user["id"]), "withdrawal", -deduction_amount, f"Withdrawal approved for request {request_id}")
+        log_action(ADMIN_ID, "approve_withdrawal", f"request_id={request_id}")
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(user["telegram_id"]),
+                text=f"Your withdrawal request has been approved. ${deduction_amount:.2f} has been deducted from your balance.",
+            )
+        except Exception as exc:
+            logger.error("Could not send withdrawal approval to user %s: %s", user['telegram_id'], exc)
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"✅ Withdrawal {request_id} approved.")
+    except Exception as exc:
+        logger.error("Error approving withdrawal %s: %s", request_id, exc, exc_info=True)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"⚠️ Error approving withdrawal: {exc}")
 
 
 async def reject_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
-    request = get_withdraw_request_by_id(request_id)
-    if not request:
-        return
-    user = get_user_by_id(int(request["user_id"]))
-    if not user:
-        return
-    update_withdraw_request_status(request_id, "Rejected")
-    log_action(ADMIN_ID, "reject_withdrawal", f"request_id={request_id}")
-    await context.bot.send_message(chat_id=int(user["telegram_id"]), text="Your withdrawal request has been rejected.")
-    await update.callback_query.edit_message_text(f"Withdrawal {request_id} rejected.")
+    try:
+        request = get_withdraw_request_by_id(request_id)
+        if not request:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ Withdrawal request {request_id} not found.")
+            return
+        user = get_user_by_id(int(request["user_id"]))
+        if not user:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"❌ User for withdrawal {request_id} not found.")
+            return
+        update_withdraw_request_status(request_id, "Rejected")
+        log_action(ADMIN_ID, "reject_withdrawal", f"request_id={request_id}")
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(user["telegram_id"]),
+                text="Your withdrawal request has been rejected.",
+            )
+        except Exception as exc:
+            logger.error("Could not send withdrawal rejection to user %s: %s", user['telegram_id'], exc)
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"❌ Withdrawal {request_id} rejected.")
+    except Exception as exc:
+        logger.error("Error rejecting withdrawal %s: %s", request_id, exc, exc_info=True)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"⚠️ Error rejecting withdrawal: {exc}")
