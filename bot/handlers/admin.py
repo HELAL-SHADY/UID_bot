@@ -178,20 +178,19 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data.startswith("reject_uid:"):
         submission_id = int(data.split(":", 1)[1])
-        context.chat_data["pending_rejection"] = submission_id
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(reason, callback_data=f"reason:{index}")] for index, reason in enumerate(REJECTION_REASONS)]
+            [[InlineKeyboardButton(reason, callback_data=f"reject_reason:{submission_id}:{index}")] for index, reason in enumerate(REJECTION_REASONS)]
         )
         await update.callback_query.edit_message_text("Select a rejection reason:", reply_markup=keyboard)
         return
 
-    if data.startswith("reason:"):
-        submission_id = context.chat_data.get("pending_rejection")
-        if not submission_id:
-            return
-        reason = REJECTION_REASONS[int(data.split(":", 1)[1])]
-        await reject_uid_submission(update, context, submission_id, reason)
-        context.chat_data.pop("pending_rejection", None)
+    if data.startswith("reject_reason:"):
+        parts = data.split(":")
+        submission_id = int(parts[1])
+        reason_index = int(parts[2])
+        if 0 <= reason_index < len(REJECTION_REASONS):
+            reason = REJECTION_REASONS[reason_index]
+            await reject_uid_submission(update, context, submission_id, reason)
         return
 
     if data.startswith("approve_withdraw:"):

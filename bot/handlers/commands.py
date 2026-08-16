@@ -87,10 +87,24 @@ async def check_channel_subscription(bot, user_id: int) -> bool:
         if not (chat_id.startswith("@") or chat_id.startswith("-")):
             chat_id = f"@{chat_id}"
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        return member.status in ["creator", "administrator", "member", "restricted"]
+        if member.status in ["creator", "administrator", "member"]:
+            return True
+        if member.status == "restricted":
+            return getattr(member, "is_member", True)
+        return False
     except Exception as exc:
-        logger.warning("Error checking channel subscription for user %s: %s", user_id, exc)
-        return True
+        err_str = str(exc).lower()
+        if "user not found" in err_str or "participant" in err_str or "chat member not found" in err_str:
+            return False
+        logger.error(
+            "Error checking channel subscription for user %s in channel %s: %s. "
+            "IMPORTANT: Make sure the bot is added as an Administrator to channel %s!",
+            user_id,
+            REQUIRED_CHANNEL,
+            exc,
+            REQUIRED_CHANNEL,
+        )
+        return False
 
 
 def get_user_language(user) -> str:
