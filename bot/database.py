@@ -275,6 +275,26 @@ def get_submission_by_id(submission_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def is_uid_submitted(uid: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM uid_submissions WHERE uid = %s", (uid,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return bool(row)
+
+
+def get_withdraw_request_by_id(request_id: int) -> Optional[dict]:
+    conn = get_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT * FROM withdraw_requests WHERE id = %s", (request_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return dict(row) if row else None
+
+
 def update_submission_status(submission_id: int, status: str, rejection_reason: Optional[str] = None) -> None:
     conn = get_connection()
     cursor = conn.cursor()

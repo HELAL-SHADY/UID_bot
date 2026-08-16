@@ -8,6 +8,7 @@ from bot.database import (
     add_transaction,
     get_all_users,
     get_submission_by_id,
+    get_withdraw_request_by_id,
     get_user_by_id,
     get_user_by_telegram_id,
     get_pending_uid_submissions,
@@ -241,11 +242,7 @@ async def reject_uid_submission(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def approve_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
-    from bot.database import get_connection
-
-    conn = get_connection()
-    request = conn.execute("SELECT * FROM withdraw_requests WHERE id = ?", (request_id,)).fetchone()
-    conn.close()
+    request = get_withdraw_request_by_id(request_id)
     if not request:
         return
     user = get_user_by_id(int(request["user_id"]))
@@ -265,11 +262,7 @@ async def approve_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def reject_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
-    from bot.database import get_connection
-
-    conn = get_connection()
-    request = conn.execute("SELECT * FROM withdraw_requests WHERE id = ?", (request_id,)).fetchone()
-    conn.close()
+    request = get_withdraw_request_by_id(request_id)
     if not request:
         return
     user = get_user_by_id(int(request["user_id"]))

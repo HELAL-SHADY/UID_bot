@@ -16,6 +16,7 @@ from bot.database import (
     get_stats_summary,
     get_user_by_telegram_id,
     get_user_stats,
+    is_uid_submitted,
     refresh_ranks,
     set_balance,
 )
@@ -121,7 +122,7 @@ def build_main_menu(language: str = "en") -> InlineKeyboardMarkup:
             "stats": "إحصائياتي",
         },
     }
-    current = labels[language]
+    current = labels.get(language, labels["en"])
     keyboard = [
         [InlineKeyboardButton(current["submit"], callback_data="submit_uid")],
         [InlineKeyboardButton(current["balance"], callback_data="my_balance")],
@@ -131,9 +132,39 @@ def build_main_menu(language: str = "en") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def build_back_button(language: str = "en") -> InlineKeyboardMarkup:
+    label = "🏠 القائمة الرئيسية / Main Menu" if language == "ar" else "🏠 Main Menu"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="main_menu")]])
+
+
+def clear_user_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.chat_data is not None:
+        context.chat_data.pop("state", None)
+    if context.user_data is not None:
+        context.user_data.pop("state", None)
+
+
+def set_user_state(context: ContextTypes.DEFAULT_TYPE, state_name: str) -> None:
+    if context.chat_data is not None:
+        context.chat_data["state"] = state_name
+    if context.user_data is not None:
+        context.user_data["state"] = state_name
+
+
+def get_user_state(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    state = None
+    if context.user_data is not None:
+        state = context.user_data.get("state")
+    if not state and context.chat_data is not None:
+        state = context.chat_data.get("state")
+    return state
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_user:
         return
+
+    clear_user_state(context)
 
     user = update.effective_user
     ensure_user(
@@ -171,6 +202,14 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
     language = get_user_language(user)
 
     data = query.data or ""
+    if data == "main_menu":
+        clear_user_state(context)
+        await query.edit_message_text(
+            get_welcome_text(language),
+            reply_markup=build_main_menu(language),
+        )
+        return
+
     if data == "check_subscription":
         subscribed = await check_channel_subscription(context.bot, query.from_user.id)
         if subscribed:
@@ -194,12 +233,13 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         prompt = {
             "en": "Please send your Bybit UID. It must be numeric and unique.",
             "ar": "يرجى إرسال Bybit UID الخاص بك. يجب أن يكون رقميًا وفريدًا.",
-        }[language]
-        await query.edit_message_text(prompt)
-        context.chat_data["state"] = "awaiting_uid"
+        }.get(language, "en")
+        await query.edit_message_text(prompt, reply_markup=build_back_button(language))
+        set_user_state(context, "awaiting_uid")
         return
 
     if data == "my_balance":
+        clear_user_state(context)
         user = get_user_by_telegram_id(query.from_user.id)
         if not user:
             await query.edit_message_text("You are not registered yet. Start the bot again with /start.")
@@ -209,8 +249,8 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         text = {
             "en": f"Your current balance is ${stats['balance']:.2f}\nApproved UIDs: {stats['approved_count']}\nTotal earnings: ${stats['total_earnings']:.2f}",
             "ar": f"رصيدك الحالي هو ${stats['balance']:.2f}\nUIDs المعتمدة: {stats['approved_count']}\nالإجمالي المكتسب: ${stats['total_earnings']:.2f}",
-        }[language]
-        await query.edit_message_text(text)
+        }.get(language, "en")
+        await query.edit_message_text(text, reply_markup=build_back_button(language))
         return
 
     if data == "withdraw_balance":
@@ -222,12 +262,13 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         text = {
             "en": f"Your current balance is ${stats['balance']:.2f}.\nPlease send your Binance UID and any withdrawal notes.\nExample: 12345678 | BTC network",
             "ar": f"رصيدك الحالي هو ${stats['balance']:.2f}.\nيرجى إرسال Binance UID الخاص بك وأي ملاحظات للسحب.\nمثال: 12345678 | BTC network",
-        }[language]
-        await query.edit_message_text(text)
-        context.chat_data["state"] = "awaiting_withdrawal"
+        }.get(language, "en")
+        await query.edit_message_text(text, reply_markup=build_back_button(language))
+        set_user_state(context, "awaiting_withdrawal")
         return
 
     if data == "my_stats":
+        clear_user_state(context)
         user = get_user_by_telegram_id(query.from_user.id)
         if not user:
             await query.edit_message_text("You are not registered yet. Start the bot again with /start.")
@@ -245,9 +286,13 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         text = {
             "en": f"Your rank: #{int(user['rank']) if user['rank'] else 'N/A'}\nApproved UIDs: {stats['approved_count']}\nTotal earnings: ${stats['total_earnings']:.2f}\n\nTop users:\n{rank_text}",
             "ar": f"رتبتك: #{int(user['rank']) if user['rank'] else 'N/A'}\nUIDs المعتمدة: {stats['approved_count']}\nالإجمالي المكتسب: ${stats['total_earnings']:.2f}\n\nأعلى المستخدمين:\n{rank_text}",
-        }[language]
-        await query.edit_message_text(text)
+        }.get(language, "en")
+        await query.edit_message_text(text, reply_markup=build_back_button(language))
         return
+
+
+def is_valid_uid(value: str) -> bool:
+    return value.isdigit() and 4 <= len(value) <= 20
 
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,8 +312,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    state = context.chat_data.get("state")
-    if state == "awaiting_uid":
+    state = get_user_state(context)
+    text = (update.message.text or "").strip()
+
+    if state == "awaiting_uid" or (not state and is_valid_uid(text)):
         await process_uid_submission(update, context)
         return
 
@@ -276,76 +323,143 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await process_withdrawal_request(update, context)
         return
 
-
-def is_valid_uid(value: str) -> bool:
-    return value.isdigit() and 4 <= len(value) <= 20
+    # Fallback for unhandled text messages
+    user = get_user_by_telegram_id(update.effective_user.id)
+    language = get_user_language(user)
+    msg = {
+        "en": "Please select an option from the main menu below:",
+        "ar": "يرجى اختيار أحد الخيارات من القائمة الرئيسية أدناه:",
+    }.get(language, "en")
+    await update.message.reply_text(msg, reply_markup=build_main_menu(language))
 
 
 async def process_uid_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = (update.message.text or "").strip()
-    if not is_valid_uid(uid):
-        await update.message.reply_text("Please enter a valid numeric Bybit UID.")
-        return
+    try:
+        user_record = get_user_by_telegram_id(update.effective_user.id)
+        language = get_user_language(user_record)
+        uid = (update.message.text or "").strip()
 
-    user = ensure_user(
-        telegram_id=update.effective_user.id,
-        username=update.effective_user.username,
-        first_name=update.effective_user.first_name or "",
-        last_name=update.effective_user.last_name or "",
-        full_name=(update.effective_user.first_name or "") + (" " + update.effective_user.last_name if update.effective_user.last_name else ""),
-    )
+        if not is_valid_uid(uid):
+            msg = {
+                "en": "Please enter a valid numeric Bybit UID.",
+                "ar": "يرجى إدخال Bybit UID رقمي صحيح.",
+            }.get(language, "en")
+            await update.message.reply_text(msg)
+            return
 
-    existing_user = get_user_by_telegram_id(update.effective_user.id)
-    if not existing_user:
-        await update.message.reply_text("Your account could not be registered. Please try again.")
-        return
+        user = ensure_user(
+            telegram_id=update.effective_user.id,
+            username=update.effective_user.username,
+            first_name=update.effective_user.first_name or "",
+            last_name=update.effective_user.last_name or "",
+            full_name=(update.effective_user.first_name or "") + (" " + update.effective_user.last_name if update.effective_user.last_name else ""),
+        )
 
-    # Prevent duplicate UID submissions using a simple lookup.
-    from bot.database import get_connection
+        existing_user = get_user_by_telegram_id(update.effective_user.id)
+        if not existing_user:
+            msg = {
+                "en": "Your account could not be registered. Please try again.",
+                "ar": "تعذر تسجيل حسابك. يرجى المحاولة مرة أخرى.",
+            }.get(language, "en")
+            await update.message.reply_text(msg, reply_markup=build_main_menu(language))
+            return
 
-    conn = get_connection()
-    duplicate = conn.execute("SELECT id FROM uid_submissions WHERE uid = ?", (uid,)).fetchone()
-    conn.close()
-    if duplicate:
-        await update.message.reply_text("This UID has already been submitted before.")
-        context.chat_data.pop("state", None)
-        return
+        if is_uid_submitted(uid):
+            msg = {
+                "en": "⚠️ This UID has already been submitted before.",
+                "ar": "⚠️ تم تقديم هذا الـ UID من قبل.",
+            }.get(language, "en")
+            await update.message.reply_text(msg, reply_markup=build_main_menu(language))
+            clear_user_state(context)
+            return
 
-    submission_id = add_submission(int(existing_user["id"]), uid)
-    await update.message.reply_text("Your UID has been submitted successfully and is pending review.")
-    await notify_admin_of_submission(update, context, submission_id, uid)
-    context.chat_data.pop("state", None)
+        submission_id = add_submission(int(existing_user["id"]), uid)
+        msg = {
+            "en": "✅ Your UID has been submitted successfully and is pending review.",
+            "ar": "✅ تم إرسال الـ UID الخاص بك بنجاح وهو قيد المراجعة.",
+        }.get(language, "en")
+        await update.message.reply_text(msg, reply_markup=build_main_menu(language))
+
+        try:
+            await notify_admin_of_submission(update, context, submission_id, uid)
+        except Exception as exc:
+            logger.error("Failed to notify admin of submission %s: %s", submission_id, exc)
+
+        clear_user_state(context)
+    except Exception as exc:
+        logger.error("Error processing UID submission: %s", exc, exc_info=True)
+        clear_user_state(context)
+        await update.message.reply_text(
+            "An error occurred while processing your request. Please try again with /start.",
+            reply_markup=build_main_menu(),
+        )
 
 
 async def process_withdrawal_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    payload = (update.message.text or "").strip()
-    if not payload:
-        await update.message.reply_text("Please provide a valid Binance UID and optional notes.")
-        return
+    try:
+        user_record = get_user_by_telegram_id(update.effective_user.id)
+        language = get_user_language(user_record)
+        payload = (update.message.text or "").strip()
 
-    parts = [part.strip() for part in payload.split("|", 1)]
-    binance_uid = parts[0]
-    notes = parts[1] if len(parts) > 1 else "No additional notes"
-    if not binance_uid or len(binance_uid) < 2:
-        await update.message.reply_text("Please provide a valid Binance UID.")
-        return
+        if not payload:
+            msg = {
+                "en": "Please provide a valid Binance UID and optional notes.",
+                "ar": "يرجى تقديم Binance UID صحيح وملاحظات اختيارية.",
+            }.get(language, "en")
+            await update.message.reply_text(msg)
+            return
 
-    user = get_user_by_telegram_id(update.effective_user.id)
-    if not user:
-        await update.message.reply_text("You are not registered yet.")
-        return
+        parts = [part.strip() for part in payload.split("|", 1)]
+        binance_uid = parts[0]
+        notes = parts[1] if len(parts) > 1 else "No additional notes"
+        if not binance_uid or len(binance_uid) < 2:
+            msg = {
+                "en": "Please provide a valid Binance UID.",
+                "ar": "يرجى تقديم Binance UID صحيح.",
+            }.get(language, "en")
+            await update.message.reply_text(msg)
+            return
 
-    stats = get_user_stats(int(user["id"]))
-    if stats["balance"] <= 0:
-        await update.message.reply_text("Your balance is zero, so there is nothing to withdraw.")
-        context.chat_data.pop("state", None)
-        return
+        user = get_user_by_telegram_id(update.effective_user.id)
+        if not user:
+            msg = {
+                "en": "You are not registered yet.",
+                "ar": "أنت غير مسجل بعد.",
+            }.get(language, "en")
+            await update.message.reply_text(msg)
+            return
 
-    withdrawal_info = f"Binance UID: {binance_uid}"
-    if notes and notes != "No additional notes":
-        withdrawal_info += f" | Notes: {notes}"
+        stats = get_user_stats(int(user["id"]))
+        if stats["balance"] <= 0:
+            msg = {
+                "en": "Your balance is zero, so there is nothing to withdraw.",
+                "ar": "رصيدك صفر، لا يوجد شيء للسحب.",
+            }.get(language, "en")
+            await update.message.reply_text(msg, reply_markup=build_main_menu(language))
+            clear_user_state(context)
+            return
 
-    request_id = create_withdraw_request(int(user["id"]), float(stats["balance"]), withdrawal_info)
-    await update.message.reply_text("Your withdrawal request has been submitted for review.")
-    await notify_admin_of_withdrawal(update, context, request_id, float(stats["balance"]), withdrawal_info)
-    context.chat_data.pop("state", None)
+        withdrawal_info = f"Binance UID: {binance_uid}"
+        if notes and notes != "No additional notes":
+            withdrawal_info += f" | Notes: {notes}"
+
+        request_id = create_withdraw_request(int(user["id"]), float(stats["balance"]), withdrawal_info)
+        msg = {
+            "en": "✅ Your withdrawal request has been submitted for review.",
+            "ar": "✅ تم إرسال طلب السحب الخاص بك للمراجعة.",
+        }.get(language, "en")
+        await update.message.reply_text(msg, reply_markup=build_main_menu(language))
+
+        try:
+            await notify_admin_of_withdrawal(update, context, request_id, float(stats["balance"]), withdrawal_info)
+        except Exception as exc:
+            logger.error("Failed to notify admin of withdrawal %s: %s", request_id, exc)
+
+        clear_user_state(context)
+    except Exception as exc:
+        logger.error("Error processing withdrawal request: %s", exc, exc_info=True)
+        clear_user_state(context)
+        await update.message.reply_text(
+            "An error occurred while processing your request. Please try again with /start.",
+            reply_markup=build_main_menu(),
+        )
