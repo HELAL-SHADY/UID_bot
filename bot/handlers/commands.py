@@ -19,31 +19,78 @@ from bot.database import (
     refresh_ranks,
     set_balance,
 )
-from bot.config import ADMIN_ID, RATE_LIMIT_PER_MINUTE
+from bot.config import ADMIN_ID, RATE_LIMIT_PER_MINUTE, REWARD_AMOUNT, REQUIRED_CHANNEL, REQUIRED_CHANNEL_URL
 from bot.handlers.admin import notify_admin_of_submission, notify_admin_of_withdrawal
 from bot.utils.logging import setup_logging
 
 logger = setup_logging()
 USER_ACTION_TIMES: dict[int, list[float]] = defaultdict(list)
 
-WELCOME_TEXT = {
-    "en": (
-        "Welcome to the Bybit UID Review Bot!\n\n"
-        "Here’s how the reward system works:\n"
-        "• Submit your Bybit UID for review\n"
-        "• If approved, you receive a $1.00 reward balance\n"
-        "• You can track your balance, statistics, and leaderboard here\n\n"
-        "To get started, use the buttons below."
-    ),
-    "ar": (
-        "مرحبًا بك في بوت مراجعة Bybit UID!\n\n"
-        "إليك كيف تعمل نظام المكافآت:\n"
-        "• أرسل Bybit UID الخاص بك للمراجعة\n"
-        "• إذا تمت الموافقة عليه، ستحصل على رصيد مكافأة بقيمة 1.00 دولار\n"
-        "• يمكنك متابعة رصيدك وإحصائياتك ولوحة المتصدرين هنا\n\n"
-        "للبداية، استخدم الأزرار أدناه."
-    ),
-}
+
+def get_welcome_text(language: str = "en") -> str:
+    return {
+        "en": (
+            "Welcome to the Bybit UID Review Bot!\n\n"
+            "Here’s how the reward system works:\n"
+            "• Submit your Bybit UID for review\n"
+            f"• If approved, you receive a ${REWARD_AMOUNT:.2f} reward balance\n"
+            "• You can track your balance, statistics, and leaderboard here\n\n"
+            "To get started, use the buttons below."
+        ),
+        "ar": (
+            "مرحبًا بك في بوت مراجعة Bybit UID!\n\n"
+            "إليك كيف تعمل نظام المكافآت:\n"
+            "• أرسل Bybit UID الخاص بك للمراجعة\n"
+            f"• إذا تمت الموافقة عليه، ستحصل على رصيد مكافأة بقيمة {REWARD_AMOUNT:.2f}$ دولار\n"
+            "• يمكنك متابعة رصيدك وإحصائياتك ولوحة المتصدرين هنا\n\n"
+            "للبداية، استخدم الأزرار أدناه."
+        ),
+    }.get(language, "en")
+
+
+def build_force_sub_keyboard() -> InlineKeyboardMarkup:
+    channel_link = REQUIRED_CHANNEL_URL
+    if not channel_link and REQUIRED_CHANNEL:
+        clean_channel = REQUIRED_CHANNEL.lstrip("@")
+        channel_link = f"https://t.me/{clean_channel}"
+
+    keyboard = []
+    if channel_link:
+        keyboard.append([InlineKeyboardButton("📢 الاشتراك في القناة / Join Channel", url=channel_link)])
+    keyboard.append([InlineKeyboardButton("🔄 تحقق من الاشتراك / Check Subscription", callback_data="check_subscription")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_force_sub_text(language: str = "ar") -> str:
+    return {
+        "en": (
+            "⚠️ Subscription Required\n\n"
+            "You must subscribe to our Telegram channel first to use this bot.\n"
+            "Please click the channel link below to join, then press 'Check Subscription'."
+        ),
+        "ar": (
+            "⚠️ اشترك في القناة أولاً\n\n"
+            "عذراً، يجب عليك الاشتراك في القناة الرسمية لاستخدام البوت.\n"
+            "اشترك في القناة من الزر أدناه ثم اضغط على \"تحقق من الاشتراك\"."
+        ),
+    }.get(language, "ar")
+
+
+async def check_channel_subscription(bot, user_id: int) -> bool:
+    if not REQUIRED_CHANNEL or REQUIRED_CHANNEL == "@YourChannelUsername":
+        return True
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        chat_id = REQUIRED_CHANNEL
+        if not (chat_id.startswith("@") or chat_id.startswith("-")):
+            chat_id = f"@{chat_id}"
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in ["creator", "administrator", "member", "restricted"]
+    except Exception as exc:
+        logger.warning("Error checking channel subscription for user %s: %s", user_id, exc)
+        return True
+
 
 def get_user_language(user) -> str:
     if not user:
@@ -85,22 +132,30 @@ def build_main_menu(language: str = "en") -> InlineKeyboardMarkup:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not update.effective_chat or not update.effective_user:
         return
 
     user = update.effective_user
-    if user:
-        ensure_user(
-            telegram_id=user.id,
-            username=user.username,
-            first_name=user.first_name or "",
-            last_name=user.last_name or "",
-            full_name=(user.first_name or "") + (" " + user.last_name if user.last_name else ""),
-        )
+    ensure_user(
+        telegram_id=user.id,
+        username=user.username,
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+        full_name=(user.first_name or "") + (" " + user.last_name if user.last_name else ""),
+    )
 
-    user_record = get_user_by_telegram_id(user.id) if user else None
+    user_record = get_user_by_telegram_id(user.id)
     language = get_user_language(user_record)
-    await update.message.reply_text(WELCOME_TEXT[language], reply_markup=build_main_menu(language))
+
+    subscribed = await check_channel_subscription(context.bot, user.id)
+    if not subscribed:
+        await update.message.reply_text(
+            get_force_sub_text(language),
+            reply_markup=build_force_sub_keyboard(),
+        )
+        return
+
+    await update.message.reply_text(get_welcome_text(language), reply_markup=build_main_menu(language))
 
 
 async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -116,6 +171,25 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
     language = get_user_language(user)
 
     data = query.data or ""
+    if data == "check_subscription":
+        subscribed = await check_channel_subscription(context.bot, query.from_user.id)
+        if subscribed:
+            await query.edit_message_text(
+                get_welcome_text(language),
+                reply_markup=build_main_menu(language),
+            )
+        else:
+            await query.answer("❌ لم تقم بالاشتراك في القناة بعد!", show_alert=True)
+        return
+
+    subscribed = await check_channel_subscription(context.bot, query.from_user.id)
+    if not subscribed:
+        await query.edit_message_text(
+            get_force_sub_text(language),
+            reply_markup=build_force_sub_keyboard(),
+        )
+        return
+
     if data == "submit_uid":
         prompt = {
             "en": "Please send your Bybit UID. It must be numeric and unique.",
@@ -181,6 +255,16 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not check_rate_limit(update.effective_user.id):
         await update.message.reply_text("Too many requests. Please wait a moment and try again.")
+        return
+
+    subscribed = await check_channel_subscription(context.bot, update.effective_user.id)
+    if not subscribed:
+        user = get_user_by_telegram_id(update.effective_user.id)
+        language = get_user_language(user)
+        await update.message.reply_text(
+            get_force_sub_text(language),
+            reply_markup=build_force_sub_keyboard(),
+        )
         return
 
     state = context.chat_data.get("state")

@@ -13,3 +13,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot/data/bot.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+REWARD_AMOUNT = float(os.getenv("REWARD_AMOUNT", "2.0"))
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "").strip()
+

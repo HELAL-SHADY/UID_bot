@@ -31,7 +31,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_main_menu_callback,
-            pattern=r"^(submit_uid|my_balance|withdraw_balance|my_stats)$",
+            pattern=r"^(submit_uid|my_balance|withdraw_balance|my_stats|check_subscription)$",
         )
     )
     application.add_handler(CallbackQueryHandler(handle_admin_callback))

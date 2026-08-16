@@ -3,7 +3,7 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import ADMIN_ID
+from bot.config import ADMIN_ID, REWARD_AMOUNT
 from bot.database import (
     add_transaction,
     get_all_users,
@@ -27,6 +27,7 @@ REJECTION_REASONS = [
     "Required trading volume has not been completed",
     "Required deposit has not been completed",
 ]
+
 
 
 async def is_admin(update: Update) -> bool:
@@ -213,14 +214,14 @@ async def approve_uid_submission(update: Update, context: ContextTypes.DEFAULT_T
 
     update_submission_status(submission_id, "Approved")
     current_balance = float(user["balance"])
-    new_balance = current_balance + 1.0
+    new_balance = current_balance + REWARD_AMOUNT
     set_balance(int(user["id"]), new_balance)
-    add_transaction(int(user["id"]), "reward", 1.0, f"Approved UID reward for submission {submission_id}")
+    add_transaction(int(user["id"]), "reward", REWARD_AMOUNT, f"Approved UID reward for submission {submission_id}")
     log_action(ADMIN_ID, "approve_uid", f"submission_id={submission_id}")
 
     await context.bot.send_message(
         chat_id=int(user["telegram_id"]),
-        text="Your UID has been approved. $1.00 has been added to your balance.",
+        text=f"Your UID has been approved. ${REWARD_AMOUNT:.2f} has been added to your balance.",
     )
     await update.callback_query.edit_message_text(f"Submission {submission_id} approved.")
 
